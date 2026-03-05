@@ -9,8 +9,8 @@ SERIAL_PORT = 'COM4'  # Change this to your serial port (e.g., 'COM3' on Windows
 BAUD_RATE = 57600
 IMAGE_WIDTH = 32
 IMAGE_HEIGHT = 24
-DISPLAY_WIDTH = 640  # Resized width for display
-DISPLAY_HEIGHT = 480 # Resized height for display
+DISPLAY_WIDTH = 320  # Resized width for display
+DISPLAY_HEIGHT = 240 # Resized height for display
 
 # --- Main Program ---
 def main():
