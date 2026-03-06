@@ -15,6 +15,7 @@ This repository is designed for fully offline deployment for data collection and
 │   ├── MLX90640_API.cpp/.h
 │   ├── MLX90640_I2C_Driver.cpp/.h
 │   ├── thermal_image_processor.cpp/.h
+│   ├── node.ino
 │   └── ...
 └── python_parser/        # Raspberry Pi 4B visualizer + parser
     ├── parser_pi.py
@@ -48,17 +49,16 @@ This repository is designed for fully offline deployment for data collection and
 
 ## Software Requirements
 ### Raspberry Pi (Python)
-Install the usual scientific stack:
-```pip install numpy==2.2.4```
-
 For OpenCV, Raspberry Pi OS often requires an older version:
-```pip install opencv-python==4.13.0```
+```py
+pip install  numpy==2.2.4 opencv-python==4.13.0
+```
 
 ### YOLO26n (ONNX Export)
-YOLO26n must be exported on another machine (Linux/Windows/macOS) because:
-- PyTorch installation on Raspberry Pi 4B is slow and version‑sensitive
-- ONNX export is CPU‑heavy and not Pi‑friendly
-```yolo export model=yolo26n.pt format=onnx imgsz=320 dynamic=False```
+YOLO26n should be exported to ONNX for faster CPU processing. Export in another device in case of compatibility issues:
+```py
+yolo export model=yolo26n.pt format=onnx imgsz=320 dynamic=False
+```
 
 Copy the resulting .onnx file into the Pi.
 
@@ -86,7 +86,9 @@ cd crowdaware-offline/python_parser
 Install dependencies (see above).
 Place your exported YOLO26n .onnx file in the folder.
 ### 3. Run the Visualizer
-```python3 parser_pi.py```
+```bash
+python3 parser_pi.py
+```
 
 
 This will:
