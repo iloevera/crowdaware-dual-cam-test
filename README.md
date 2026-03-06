@@ -50,13 +50,13 @@ This repository is designed for fully offline deployment for data collection and
 ## Software Requirements
 ### Raspberry Pi (Python)
 For OpenCV, Raspberry Pi OS often requires an older version:
-```py
+```
 pip install  numpy==2.2.4 opencv-python==4.13.0
 ```
 
 ### YOLO26n (ONNX Export)
 YOLO26n should be exported to ONNX for faster CPU processing. Export in another device in case of compatibility issues:
-```py
+```
 yolo export model=yolo26n.pt format=onnx imgsz=320 dynamic=False
 ```
 
@@ -79,14 +79,14 @@ const uint8_t MLX90640_ADDRESS = 0x33;
 Upload to Heltec LoRa V3.
 ### 2. Prepare the Raspberry Pi
 Clone the repo:
-```bash
+```
 git clone https://github.com/<yourname>/crowdaware-offline.git
 cd crowdaware-offline/python_parser
 ```
 Install dependencies (see above).
 Place your exported YOLO26n .onnx file in the folder.
 ### 3. Run the Visualizer
-```bash
+```
 python3 parser_pi.py
 ```
 
