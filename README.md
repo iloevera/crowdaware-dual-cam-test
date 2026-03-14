@@ -18,8 +18,10 @@ This repository is designed for fully offline deployment for data collection and
 │   ├── node.ino
 │   └── ...
 └── python_parser/        # Raspberry Pi 4B visualizer + parser
-    ├── parser_pi.py
-    └── parser_win.py
+│   ├── parser_pi.py
+│   └── parser_win.py
+└── evaluation/           # Compute the accuracy of the thermal camera by comparing with the RGB (YOLOv26n)
+    └── accuracy_calculation.py
 ```
 
 
