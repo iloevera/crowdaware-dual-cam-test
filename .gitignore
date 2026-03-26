@@ -47,4 +47,6 @@ venv/
 # VSCode settings
 .vscode/
 vscode/
-detections.csv
+
+# Non-dummy data
+data/

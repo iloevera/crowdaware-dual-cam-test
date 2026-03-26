@@ -2,294 +2,580 @@ import pandas as pd
 import ast
 import numpy as np
 from scipy.spatial.distance import cdist
+import tkinter as tk
+from tkinter import filedialog, scrolledtext, ttk, messagebox
+from PIL import Image, ImageTk # For image display in Tkinter
+import os
 
-# --- Adjustable Constants ---
-
-# CSV file path
-CSV_FILE_PATH = "detections.csv"
+# --- Adjustable Constants (Default Values) ---
+# These will be used to initialize the GUI widgets.
 
 # Camera Resolutions:
-THERMAL_RAW_WIDTH = 32
-THERMAL_RAW_HEIGHT = 24
-YOLO_WIDTH = 640
-YOLO_HEIGHT = 480
+THERMAL_RAW_WIDTH_DEFAULT = 32
+THERMAL_RAW_HEIGHT_DEFAULT = 24
+YOLO_WIDTH_DEFAULT = 640
+YOLO_HEIGHT_DEFAULT = 480
 
 # Thermal FOV Adjustment (Cropping Factor):
-# The thermal camera's FOV is wider than YOLO's.
-THERMAL_CROP_FACTOR = 0.8 
+THERMAL_CROP_FACTOR_DEFAULT = 0.8 
 
 # Minimum Area Thresholds:
-# Detections smaller than these thresholds are ignored for accuracy calculations.
-YOLO_MIN_AREA_THRESHOLD = 500  # Minimum area (pixels) for a YOLO detection to be considered
-THERMAL_MIN_AREA_THRESHOLD = 10 # Minimum area (pixels) for a Thermal detection to be considered
+YOLO_MIN_AREA_THRESHOLD_DEFAULT = 500
+THERMAL_MIN_AREA_THRESHOLD_DEFAULT = 10
 
 # Matching Distance Threshold:
-# This is the maximum Euclidean distance (in the 640x480 YOLO coordinate system)
-# between the centroids of a thermal detection and a YOLO detection for them to
-# be considered a "match" (True Positive). Adjust based on acceptable positional error.
-MATCHING_DISTANCE_THRESHOLD = 20 # pixels
+MATCHING_DISTANCE_THRESHOLD_DEFAULT = 20
 
 # Area bins for correlation analysis:
-# These define ranges for object sizes (areas) to categorize False Negatives (FNs)
-# and False Positives (FPs). This helps understand how detection performance
-# correlates with object size (a proxy for distance).
-# YOLO_AREA_BINS: For YOLO detections (on the 640x480 grid).
-# THERMAL_AREA_BINS: For Thermal detections (on the 32x24 grid).
-YOLO_AREA_BINS = [0, 2000, 5000, 15000, 30000, np.inf] # Example bins for YOLO area (pixels)
-YOLO_AREA_BIN_LABELS = ["<2k", "2k-5k", "5k-15k", "15k-30k", ">30k"]
+YOLO_AREA_BINS_DEFAULT = [0, 2000, 5000, 15000, 30000, np.inf]
+YOLO_AREA_BIN_LABELS_DEFAULT = ["<2k", "2k-5k", "5k-15k", "15k-30k", ">30k"]
 
-THERMAL_AREA_BINS = [0, 10, 20, 50, 100, np.inf] # Example bins for Thermal area (pixels)
-THERMAL_AREA_BIN_LABELS = ["<10", "10-20", "20-50", "50-100", ">100"]
+THERMAL_AREA_BINS_DEFAULT = [0, 10, 20, 50, 100, np.inf]
+THERMAL_AREA_BIN_LABELS_DEFAULT = ["<10", "10-20", "20-50", "50-100", ">100"]
 
+class AccuracyAnalyzerGUI:
+    def __init__(self, master):
+        self.master = master
+        master.title("Thermal Camera Accuracy Analyzer")
+        master.geometry("1400x800") # Increased size for more content
 
-def calculate_accuracy(csv_file):
-    """
-    Calculates the accuracy of a thermal camera by comparing its detections
-    against a YOLO camera (considered the reference). It performs FOV alignment,
-    size-based filtering, object matching, and analyzes False Positives/Negatives
-    in relation to object size.
-    """
-    df = pd.read_csv(csv_file)
-    
-    # Convert CSV text representations of lists/dictionaries back to actual Python objects
-    df['thermal_data'] = df['thermal_data'].apply(ast.literal_eval)
-    df['yolo_data'] = df['yolo_data'].apply(ast.literal_eval)
+        # --- Variables to hold GUI state ---
+        self.csv_file_path = tk.StringVar(value="")
+        self.image_dir_path = tk.StringVar(value="")
 
-    # Lists to store data for overall metrics and correlation analysis
-    total_matched_distances = []
-    all_fn_yolo_areas = []
-    all_fp_thermal_areas = []
-    
-    # Counters for total detections considered after filtering
-    total_yolo_detections_considered = 0
-    total_thermal_detections_considered = 0
+        self.thermal_crop_factor = tk.DoubleVar(value=THERMAL_CROP_FACTOR_DEFAULT)
+        self.yolo_min_area_threshold = tk.IntVar(value=YOLO_MIN_AREA_THRESHOLD_DEFAULT)
+        self.thermal_min_area_threshold = tk.IntVar(value=THERMAL_MIN_AREA_THRESHOLD_DEFAULT)
+        self.matching_distance_threshold = tk.IntVar(value=MATCHING_DISTANCE_THRESHOLD_DEFAULT)
 
-    # Pre-calculate Thermal FOV cropping and scaling parameters
-    cropped_thermal_width = THERMAL_RAW_WIDTH * THERMAL_CROP_FACTOR
-    cropped_thermal_height = THERMAL_RAW_HEIGHT * THERMAL_CROP_FACTOR
-    
-    offset_x = (THERMAL_RAW_WIDTH - cropped_thermal_width) / 2
-    offset_y = (THERMAL_RAW_HEIGHT - cropped_thermal_height) / 2
+        # For bins, we'll use string variables and parse them
+        self.yolo_area_bins_str = tk.StringVar(value=", ".join(map(str, YOLO_AREA_BINS_DEFAULT[:-1])) + ", inf")
+        self.yolo_area_bin_labels_str = tk.StringVar(value=", ".join(YOLO_AREA_BIN_LABELS_DEFAULT))
+        self.thermal_area_bins_str = tk.StringVar(value=", ".join(map(str, THERMAL_AREA_BINS_DEFAULT[:-1])) + ", inf")
+        self.thermal_area_bin_labels_str = tk.StringVar(value=", ".join(THERMAL_AREA_BIN_LABELS_DEFAULT))
 
-    scale_x_thermal_to_yolo = YOLO_WIDTH / cropped_thermal_width
-    scale_y_thermal_to_yolo = YOLO_HEIGHT / cropped_thermal_height
+        # Results storage
+        self.analysis_results = {}
+        # Stores {'timestamp': ..., 'type': 'TP'/'FP'/'FN', 'yolo_area': ..., 'thermal_area': ..., 'distance': ...}
+        self.image_events = [] 
+        self.current_image_index = 0
+        self.filtered_image_events = []
+        self.image_display_filter = tk.StringVar(value="All") # "All", "TP", "FP", "FN"
+        self.current_photo = None # To prevent garbage collection of image
 
-    # Iterate through each timestamp (row) in the DataFrame
-    for index, row in df.iterrows():
-        # --- 1. Process Thermal Detections: Filter, Crop, and Scale ---
-        current_thermal_coords_scaled = []    # Centroids of thermal detections, scaled to YOLO grid
-        current_thermal_original_areas = []   # Original areas of thermal detections (for FP analysis)
+        # --- Layout ---
+        self.create_widgets()
+
+    def create_widgets(self):
+        # Main frames
+        param_frame = ttk.LabelFrame(self.master, text="Parameters", padding="10")
+        param_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+
+        results_frame = ttk.LabelFrame(self.master, text="Analysis Results", padding="10")
+        results_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+
+        image_review_frame = ttk.LabelFrame(self.master, text="Image Review", padding="10")
+        image_review_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
+
+        self.master.grid_rowconfigure(0, weight=1)
+        self.master.grid_rowconfigure(1, weight=1)
+        self.master.grid_columnconfigure(0, weight=1)
+        self.master.grid_columnconfigure(1, weight=1)
+
+        # --- Parameter Frame Widgets ---
+        row_idx = 0
+        ttk.Label(param_frame, text="CSV File:").grid(row=row_idx, column=0, sticky="w", pady=2)
+        ttk.Entry(param_frame, textvariable=self.csv_file_path, width=40).grid(row=row_idx, column=1, sticky="ew", pady=2)
+        ttk.Button(param_frame, text="Browse...", command=self.browse_csv).grid(row=row_idx, column=2, sticky="w", padx=5, pady=2)
+        row_idx += 1
+
+        ttk.Label(param_frame, text="Image Directory:").grid(row=row_idx, column=0, sticky="w", pady=2)
+        ttk.Entry(param_frame, textvariable=self.image_dir_path, width=40).grid(row=row_idx, column=1, sticky="ew", pady=2)
+        ttk.Button(param_frame, text="Browse...", command=self.browse_image_dir).grid(row=row_idx, column=2, sticky="w", padx=5, pady=2)
+        row_idx += 1
+
+        ttk.Separator(param_frame, orient="horizontal").grid(row=row_idx, column=0, columnspan=3, sticky="ew", pady=5)
+        row_idx += 1
+
+        ttk.Label(param_frame, text="Thermal Crop Factor (0.1-1.0):").grid(row=row_idx, column=0, sticky="w", pady=2)
+        ttk.Scale(param_frame, from_=0.1, to=1.0, orient="horizontal", variable=self.thermal_crop_factor).grid(row=row_idx, column=1, sticky="ew", pady=2)
+        ttk.Label(param_frame, textvariable=self.thermal_crop_factor, width=5).grid(row=row_idx, column=2, sticky="w", padx=5, pady=2)
+        row_idx += 1
+
+        ttk.Label(param_frame, text="YOLO Min Area Threshold:").grid(row=row_idx, column=0, sticky="w", pady=2)
+        ttk.Entry(param_frame, textvariable=self.yolo_min_area_threshold, width=10).grid(row=row_idx, column=1, sticky="w", pady=2)
+        row_idx += 1
+
+        ttk.Label(param_frame, text="Thermal Min Area Threshold:").grid(row=row_idx, column=0, sticky="w", pady=2)
+        ttk.Entry(param_frame, textvariable=self.thermal_min_area_threshold, width=10).grid(row=row_idx, column=1, sticky="w", pady=2)
+        row_idx += 1
+
+        ttk.Label(param_frame, text="Matching Distance Threshold:").grid(row=row_idx, column=0, sticky="w", pady=2)
+        ttk.Entry(param_frame, textvariable=self.matching_distance_threshold, width=10).grid(row=row_idx, column=1, sticky="w", pady=2)
+        row_idx += 1
         
-        for t_det in row['thermal_data']:
-            # Apply minimum area threshold to filter out very small thermal detections
-            if t_det['area'] < THERMAL_MIN_AREA_THRESHOLD:
-                continue
+        ttk.Label(param_frame, text="YOLO Area Bins (comma-separated, end with inf):").grid(row=row_idx, column=0, sticky="w", pady=2)
+        ttk.Entry(param_frame, textvariable=self.yolo_area_bins_str, width=40).grid(row=row_idx, column=1, columnspan=2, sticky="ew", pady=2)
+        row_idx += 1
 
-            # Get the thermal detection's centroid coordinates
-            thermal_x, thermal_y = t_det['x'], t_det['y']
-            
-            # Ignore detections that fall outside the defined cropped FOV region
-            if not (offset_x <= thermal_x < offset_x + cropped_thermal_width and
-                    offset_y <= thermal_y < offset_y + cropped_thermal_height):
-                continue
+        ttk.Label(param_frame, text="YOLO Area Bin Labels (comma-separated):").grid(row=row_idx, column=0, sticky="w", pady=2)
+        ttk.Entry(param_frame, textvariable=self.yolo_area_bin_labels_str, width=40).grid(row=row_idx, column=1, columnspan=2, sticky="ew", pady=2)
+        row_idx += 1
 
-            # Adjust coordinates to be relative to the top-left of the cropped region
-            adj_x = thermal_x - offset_x
-            adj_y = thermal_y - offset_y
+        ttk.Label(param_frame, text="Thermal Area Bins (comma-separated, end with inf):").grid(row=row_idx, column=0, sticky="w", pady=2)
+        ttk.Entry(param_frame, textvariable=self.thermal_area_bins_str, width=40).grid(row=row_idx, column=1, columnspan=2, sticky="ew", pady=2)
+        row_idx += 1
 
-            # Scale the adjusted thermal coordinates to match the YOLO camera's resolution
-            scaled_x = adj_x * scale_x_thermal_to_yolo
-            scaled_y = adj_y * scale_y_thermal_to_yolo
-            
-            current_thermal_coords_scaled.append([scaled_x, scaled_y])
-            current_thermal_original_areas.append(t_det['area'])
+        ttk.Label(param_frame, text="Thermal Area Bin Labels (comma-separated):").grid(row=row_idx, column=0, sticky="w", pady=2)
+        ttk.Entry(param_frame, textvariable=self.thermal_area_bin_labels_str, width=40).grid(row=row_idx, column=1, columnspan=2, sticky="ew", pady=2)
+        row_idx += 1
+
+        ttk.Button(param_frame, text="Calculate Accuracy", command=self.run_analysis).grid(row=row_idx, column=0, columnspan=3, pady=10)
         
-        total_thermal_detections_considered += len(current_thermal_coords_scaled)
+        param_frame.grid_columnconfigure(1, weight=1) # Allow entry to expand
 
-        # --- 2. Process YOLO Detections: Filter and Calculate Centroids ---
-        current_yolo_coords = []          # Centroids of YOLO detections (already in YOLO grid)
-        current_yolo_original_areas = []  # Original areas of YOLO detections (for FN analysis)
+        # --- Results Frame Widgets ---
+        self.results_text = scrolledtext.ScrolledText(results_frame, wrap="word", width=60, height=20, state="disabled")
+        self.results_text.pack(expand=True, fill="both")
 
-        for y_det in row['yolo_data']:
-            # Extract bounding box coordinates from YOLO detection
-            yolo_x1, yolo_y1, yolo_x2, yolo_y2 = y_det['x1'], y_det['y1'], y_det['x2'], y_det['y2']
+        # --- Image Review Frame Widgets ---
+        # Controls for image filtering
+        filter_frame = ttk.Frame(image_review_frame)
+        filter_frame.pack(pady=5)
+        ttk.Label(filter_frame, text="Show:").pack(side="left", padx=5)
+        ttk.Radiobutton(filter_frame, text="All", variable=self.image_display_filter, value="All", command=self.apply_image_filter).pack(side="left", padx=5)
+        ttk.Radiobutton(filter_frame, text="True Positives", variable=self.image_display_filter, value="TP", command=self.apply_image_filter).pack(side="left", padx=5)
+        ttk.Radiobutton(filter_frame, text="False Positives", variable=self.image_display_filter, value="FP", command=self.apply_image_filter).pack(side="left", padx=5)
+        ttk.Radiobutton(filter_frame, text="False Negatives", variable=self.image_display_filter, value="FN", command=self.apply_image_filter).pack(side="left", padx=5)
+
+        # Image display area
+        self.image_label = ttk.Label(image_review_frame, text="No image loaded.")
+        self.image_label.pack(pady=10)
+        
+        self.image_info_label = ttk.Label(image_review_frame, text="Image Info: ")
+        self.image_info_label.pack(pady=2)
+
+        # Navigation buttons
+        nav_frame = ttk.Frame(image_review_frame)
+        nav_frame.pack(pady=5)
+        ttk.Button(nav_frame, text="Previous", command=self.show_previous_image).pack(side="left", padx=10)
+        ttk.Button(nav_frame, text="Next", command=self.show_next_image).pack(side="left", padx=10)
+
+    def browse_csv(self):
+        file_path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
+        if file_path:
+            self.csv_file_path.set(file_path)
+            # Automatically set image directory to the same folder as CSV
+            self.image_dir_path.set(os.path.dirname(file_path))
+
+    def browse_image_dir(self):
+        dir_path = filedialog.askdirectory()
+        if dir_path:
+            self.image_dir_path.set(dir_path)
+
+    def parse_bins(self, bins_str_var, labels_str_var, default_bins, default_labels):
+        """Parses bin edges and labels from string variables."""
+        try:
+            bins_raw = [x.strip() for x in bins_str_var.get().split(',')]
+            bins_list = []
+            for x in bins_raw:
+                if x.lower() == 'inf':
+                    bins_list.append(np.inf)
+                else:
+                    bins_list.append(float(x))
             
-            # Calculate the area of the YOLO bounding box
-            yolo_area = (yolo_x2 - yolo_x1) * (yolo_y2 - yolo_y1)
+            labels_list = [x.strip() for x in labels_str_var.get().split(',')]
             
-            # Apply minimum area threshold to filter out very small YOLO detections
-            if yolo_area < YOLO_MIN_AREA_THRESHOLD:
-                continue
+            if len(bins_list) != len(labels_list) + 1:
+                raise ValueError(f"Number of bin edges ({len(bins_list)}) must be one more than number of labels ({len(labels_list)}).")
+            return bins_list, labels_list
+        except Exception as e:
+            messagebox.showerror("Input Error", f"Invalid bin format: {e}\nUsing default bins for this category.")
+            return default_bins, default_labels
 
-            # Calculate the centroid of the YOLO bounding box
-            cx = (yolo_x1 + yolo_x2) / 2
-            cy = (yolo_y1 + yolo_y2) / 2
+    def run_analysis(self):
+        csv_path = self.csv_file_path.get()
+        if not os.path.exists(csv_path):
+            messagebox.showerror("Error", "CSV file not found.")
+            return
+
+        # Parse bins from string inputs, using defaults on error
+        yolo_bins, yolo_labels = self.parse_bins(self.yolo_area_bins_str, self.yolo_area_bin_labels_str, YOLO_AREA_BINS_DEFAULT, YOLO_AREA_BIN_LABELS_DEFAULT)
+        thermal_bins, thermal_labels = self.parse_bins(self.thermal_area_bins_str, self.thermal_area_bin_labels_str, THERMAL_AREA_BINS_DEFAULT, THERMAL_AREA_BIN_LABELS_DEFAULT)
+
+        try:
+            results, image_events = self._calculate_accuracy(
+                csv_path,
+                self.thermal_crop_factor.get(),
+                self.yolo_min_area_threshold.get(),
+                self.thermal_min_area_threshold.get(),
+                self.matching_distance_threshold.get(),
+                yolo_bins, yolo_labels,
+                thermal_bins, thermal_labels
+            )
+            self.analysis_results = results
+            self.image_events = image_events
+            self.display_results()
+            self.apply_image_filter() # Initialize image review with current filter
+        except Exception as e:
+            messagebox.showerror("Analysis Error", f"An error occurred during analysis: {e}")
+
+    def display_results(self):
+        self.results_text.config(state="normal")
+        self.results_text.delete(1.0, tk.END)
+        
+        res = self.analysis_results
+        
+        output = f"--- Thermal Camera Accuracy Analysis ---\n"
+        output += f"Analysis based on {res['num_timestamps']} timestamps from '{self.csv_file_path.get()}'\n"
+        output += f"YOLO Resolution: {YOLO_WIDTH_DEFAULT}x{YOLO_HEIGHT_DEFAULT}, Thermal Raw Resolution: {THERMAL_RAW_WIDTH_DEFAULT}x{THERMAL_RAW_HEIGHT_DEFAULT}\n"
+        output += f"Thermal FOV Cropped to {self.thermal_crop_factor.get()*100:.0f}% central region.\n"
+        output += f"YOLO Min Area Threshold: {self.yolo_min_area_threshold.get()} pixels, Thermal Min Area Threshold: {self.thermal_min_area_threshold.get()} pixels\n"
+        output += f"Matching Distance Threshold: {self.matching_distance_threshold.get()} pixels (on {YOLO_WIDTH_DEFAULT}x{YOLO_HEIGHT_DEFAULT} grid)\n"
+        output += "-" * 60 + "\n\n"
+
+        output += f"Total YOLO Detections Considered (after area filter): {res['total_yolo_detections_considered']}\n"
+        output += f"Total Thermal Detections Considered (after area/FOV filter): {res['total_thermal_detections_considered']}\n"
+        output += "-" * 60 + "\n\n"
+
+        output += f"1. DETECTION ACCURACY\n"
+        output += f"   - True Positives (TP): {res['total_tps']} ({res['tp_percentage']:.2f}% of relevant events)\n"
+        output += f"   - False Positives (FP): {res['total_fps']} ({res['fp_percentage']:.2f}% of relevant events)\n"
+        output += f"   - False Negatives (FN): {res['total_fns']} ({res['fn_percentage']:.2f}% of relevant events)\n"
+        output += f"   - Precision: {res['precision']:.2f}\n"
+        output += f"   - Recall: {res['recall']:.2f}\n"
+        output += f"   - F1-Score: {res['f1_score']:.2f}\n"
+        output += "-" * 60 + "\n\n"
+
+        output += f"2. SPATIAL ACCURACY\n"
+        output += f"   - Avg. Matched Distance Offset: {res['avg_pixel_offset']:.2f} pixels (for TP matches)\n"
+        output += "-" * 60 + "\n\n"
+
+        output += f"3. FALSE NEGATIVE ANALYSIS (YOLO detections missed by Thermal, by YOLO object size)\n"
+        if res['fn_yolo_distribution'] is not None:
+            output += str(res['fn_yolo_distribution']) + "\n"
+            output += f"   Total FNs: {res['total_fns']}\n"
+        else:
+            output += "   No False Negatives recorded.\n"
+        output += "-" * 60 + "\n\n"
+
+        output += f"4. FALSE POSITIVE ANALYSIS (Thermal detections not matched by YOLO, by Thermal object size)\n"
+        if res['fp_thermal_distribution'] is not None:
+            output += str(res['fp_thermal_distribution']) + "\n"
+            output += f"   Total FPs: {res['total_fps']}\n"
+        else:
+            output += "   No False Positives recorded.\n"
+        output += "-" * 60 + "\n\n"
+
+        self.results_text.insert(tk.END, output)
+        self.results_text.config(state="disabled")
+
+    def apply_image_filter(self):
+        filter_type = self.image_display_filter.get()
+        if filter_type == "All":
+            self.filtered_image_events = self.image_events
+        else:
+            self.filtered_image_events = [event for event in self.image_events if event['type'] == filter_type]
+        
+        self.current_image_index = 0
+        self.show_current_image()
+
+    def show_current_image(self):
+        if not self.filtered_image_events:
+            self.image_label.config(image="", text="No images to display for this filter.")
+            self.image_info_label.config(text="Image Info: ")
+            self.current_photo = None # Clear reference
+            return
+
+        image_dir = self.image_dir_path.get()
+        if not image_dir or not os.path.exists(image_dir):
+            self.image_label.config(image="", text="Image directory not set or invalid.")
+            self.image_info_label.config(text="Image Info: ")
+            self.current_photo = None
+            return
+
+        event = self.filtered_image_events[self.current_image_index]
+        timestamp = event['timestamp']
+        image_filename = os.path.join(image_dir, f"frame_{timestamp}.jpg")
+
+        if os.path.exists(image_filename):
+            try:
+                img = Image.open(image_filename)
+                img.thumbnail((400, 300)) # Resize for display
+                self.current_photo = ImageTk.PhotoImage(img) # Keep reference
+                self.image_label.config(image=self.current_photo, text="")
+                
+                info_text = f"Type: {event['type']} | Timestamp: {timestamp}"
+                if event.get('yolo_area') is not None:
+                    info_text += f" | YOLO Area: {event['yolo_area']:.0f}"
+                if event.get('thermal_area') is not None:
+                    info_text += f" | Thermal Area: {event['thermal_area']:.0f}"
+                if event.get('distance') is not None:
+                    info_text += f" | Match Dist: {event['distance']:.2f}"
+                info_text += f" ({self.current_image_index + 1} / {len(self.filtered_image_events)})"
+                self.image_info_label.config(text=info_text)
+
+            except Exception as e:
+                self.image_label.config(image="", text=f"Error loading image: {e}")
+                self.image_info_label.config(text=f"Image Info: Error loading {image_filename}")
+                self.current_photo = None
+        else:
+            self.image_label.config(image="", text=f"Image not found: {image_filename}")
+            self.image_info_label.config(text=f"Image Info: Missing {image_filename}")
+            self.current_photo = None
+
+    def show_next_image(self):
+        if self.filtered_image_events:
+            self.current_image_index = (self.current_image_index + 1) % len(self.filtered_image_events)
+            self.show_current_image()
+
+    def show_previous_image(self):
+        if self.filtered_image_events:
+            self.current_image_index = (self.current_image_index - 1 + len(self.filtered_image_events)) % len(self.filtered_image_events)
+            self.show_current_image()
+
+    def _calculate_accuracy(self, csv_file, thermal_crop_factor, yolo_min_area_threshold, thermal_min_area_threshold,
+                            matching_distance_threshold, yolo_area_bins, yolo_area_bin_labels,
+                            thermal_area_bins, thermal_area_bin_labels):
+        """
+        Calculates the accuracy of a thermal camera by comparing its detections
+        against a YOLO camera (considered the reference). It performs FOV alignment,
+        size-based filtering, object matching, and analyzes False Positives/Negatives
+        in relation to object size.
+        Returns a dictionary of results and a list of image events for GUI display.
+        """
+        df = pd.read_csv(csv_file)
+        
+        # Convert CSV text representations of lists/dictionaries back to actual Python objects
+        df['thermal_data'] = df['thermal_data'].apply(ast.literal_eval)
+        df['yolo_data'] = df['yolo_data'].apply(ast.literal_eval)
+
+        # Lists to store data for overall metrics and correlation analysis
+        total_matched_distances = []
+        all_fn_yolo_areas = []
+        all_fp_thermal_areas = []
+        
+        # List to store image event details for GUI display
+        image_events_for_gui = []
+
+        # Counters for total detections considered after filtering
+        total_yolo_detections_considered = 0
+        total_thermal_detections_considered = 0
+
+        # Pre-calculate Thermal FOV cropping and scaling parameters
+        cropped_thermal_width = THERMAL_RAW_WIDTH_DEFAULT * thermal_crop_factor
+        cropped_thermal_height = THERMAL_RAW_HEIGHT_DEFAULT * thermal_crop_factor
+        
+        offset_x = (THERMAL_RAW_WIDTH_DEFAULT - cropped_thermal_width) / 2
+        offset_y = (THERMAL_RAW_HEIGHT_DEFAULT - cropped_thermal_height) / 2
+
+        scale_x_thermal_to_yolo = YOLO_WIDTH_DEFAULT / cropped_thermal_width
+        scale_y_thermal_to_yolo = YOLO_HEIGHT_DEFAULT / cropped_thermal_height
+
+        # Iterate through each timestamp (row) in the DataFrame
+        for index, row in df.iterrows():
+            timestamp = row['timestamp']
             
-            current_yolo_coords.append([cx, cy])
-            current_yolo_original_areas.append(yolo_area)
+            # --- 1. Process Thermal Detections: Filter, Crop, and Scale ---
+            current_thermal_coords_scaled = []    # Centroids of thermal detections, scaled to YOLO grid
+            current_thermal_original_areas = []   # Original areas of thermal detections (for FP analysis)
             
-        total_yolo_detections_considered += len(current_yolo_coords)
+            for t_det in row['thermal_data']:
+                # Apply minimum area threshold to filter out very small thermal detections
+                if t_det['area'] < thermal_min_area_threshold:
+                    continue
 
-        # --- 3. Perform Matching between Filtered Thermal and YOLO Detections ---
-        # This section tries to find corresponding pairs between the two camera's detections.
-        num_thermal = len(current_thermal_coords_scaled)
-        num_yolo = len(current_yolo_coords)
+                # Get the thermal detection's centroid coordinates
+                thermal_x, thermal_y = t_det['x'], t_det['y']
+                
+                # Ignore detections that fall outside the defined cropped FOV region
+                if not (offset_x <= thermal_x < offset_x + cropped_thermal_width and
+                        offset_y <= thermal_y < offset_y + cropped_thermal_height):
+                    continue
 
-        matched_yolo_indices = set()    # Stores indices of YOLO detections that found a match
-        matched_thermal_indices = set() # Stores indices of Thermal detections that found a match
+                # Adjust coordinates to be relative to the top-left of the cropped region
+                adj_x = thermal_x - offset_x
+                adj_y = thermal_y - offset_y
 
-        if num_yolo > 0 and num_thermal > 0:
-            # Calculate Euclidean distances between every YOLO centroid and every thermal centroid
-            distances = cdist(current_yolo_coords, current_thermal_coords_scaled, metric='euclidean')
+                # Scale the adjusted thermal coordinates to match the YOLO camera's resolution
+                scaled_x = adj_x * scale_x_thermal_to_yolo
+                scaled_y = adj_y * scale_y_thermal_to_yolo
+                
+                current_thermal_coords_scaled.append([scaled_x, scaled_y])
+                current_thermal_original_areas.append(t_det['area'])
+            
+            total_thermal_detections_considered += len(current_thermal_coords_scaled)
 
-            # Create a list of all potential matches that are within the MATCHING_DISTANCE_THRESHOLD.
-            # Each entry is (distance, yolo_index, thermal_index).
-            all_possible_matches = []
+            # --- 2. Process YOLO Detections: Filter and Calculate Centroids ---
+            current_yolo_coords = []          # Centroids of YOLO detections (already in YOLO grid)
+            current_yolo_original_areas = []  # Original areas of YOLO detections (for FN analysis)
+
+            for y_det in row['yolo_data']:
+                # Extract bounding box coordinates from YOLO detection
+                yolo_x1, yolo_y1, yolo_x2, yolo_y2 = y_det['x1'], y_det['y1'], y_det['x2'], y_det['y2']
+                
+                # Calculate the area of the YOLO bounding box
+                yolo_area = (yolo_x2 - yolo_x1) * (yolo_y2 - yolo_y1)
+                
+                # Apply minimum area threshold to filter out very small YOLO detections
+                if yolo_area < yolo_min_area_threshold:
+                    continue
+
+                # Calculate the centroid of the YOLO bounding box
+                cx = (yolo_x1 + yolo_x2) / 2
+                cy = (yolo_y1 + yolo_y2) / 2
+                
+                current_yolo_coords.append([cx, cy])
+                current_yolo_original_areas.append(yolo_area)
+                
+            total_yolo_detections_considered += len(current_yolo_coords)
+
+            # --- 3. Perform Matching between Filtered Thermal and YOLO Detections ---
+            num_thermal = len(current_thermal_coords_scaled)
+            num_yolo = len(current_yolo_coords)
+
+            matched_yolo_indices = set()
+            matched_thermal_indices = set()
+
+            if num_yolo > 0 and num_thermal > 0:
+                distances = cdist(current_yolo_coords, current_thermal_coords_scaled, metric='euclidean')
+
+                all_possible_matches = []
+                for y_idx in range(num_yolo):
+                    for t_idx in range(num_thermal):
+                        if distances[y_idx, t_idx] < matching_distance_threshold:
+                            all_possible_matches.append((distances[y_idx, t_idx], y_idx, t_idx))
+                
+                all_possible_matches.sort(key=lambda x: x[0]) 
+
+                for dist, y_idx, t_idx in all_possible_matches:
+                    if y_idx not in matched_yolo_indices and t_idx not in matched_thermal_indices:
+                        matched_yolo_indices.add(y_idx)
+                        matched_thermal_indices.add(t_idx)
+                        total_matched_distances.append(dist)
+                        image_events_for_gui.append({
+                            'timestamp': timestamp,
+                            'type': 'TP',
+                            'yolo_area': current_yolo_original_areas[y_idx],
+                            'thermal_area': current_thermal_original_areas[t_idx],
+                            'distance': dist
+                        })
+            
+            # --- 4. Identify False Negatives (FNs) and False Positives (FPs) ---
             for y_idx in range(num_yolo):
-                for t_idx in range(num_thermal):
-                    if distances[y_idx, t_idx] < MATCHING_DISTANCE_THRESHOLD:
-                        all_possible_matches.append((distances[y_idx, t_idx], y_idx, t_idx))
-            
-            # Match the closest pairs first.
-            all_possible_matches.sort(key=lambda x: x[0]) 
+                if y_idx not in matched_yolo_indices:
+                    all_fn_yolo_areas.append(current_yolo_original_areas[y_idx])
+                    image_events_for_gui.append({
+                        'timestamp': timestamp,
+                        'type': 'FN',
+                        'yolo_area': current_yolo_original_areas[y_idx],
+                        'thermal_area': None # No matching thermal detection
+                    })
 
-            # Iterate through the sorted matches and assign them if both detections
-            # (YOLO and thermal) haven't been matched yet.
-            for dist, y_idx, t_idx in all_possible_matches:
-                if y_idx not in matched_yolo_indices and t_idx not in matched_thermal_indices:
-                    matched_yolo_indices.add(y_idx)
-                    matched_thermal_indices.add(t_idx)
-                    total_matched_distances.append(dist) # Store distance for spatial accuracy calculation
+            for t_idx in range(num_thermal):
+                if t_idx not in matched_thermal_indices:
+                    all_fp_thermal_areas.append(current_thermal_original_areas[t_idx])
+                    image_events_for_gui.append({
+                        'timestamp': timestamp,
+                        'type': 'FP',
+                        'yolo_area': None, # No matching yolo detection
+                        'thermal_area': current_thermal_original_areas[t_idx]
+                    })
+
+        # --- 5. Calculate Overall Accuracy Metrics ---
         
-        # --- 4. Identify False Negatives (FNs) and False Positives (FPs) ---
-        # False Negatives: YOLO detections that were not successfully matched by any thermal detection.
-        for y_idx in range(num_yolo):
-            if y_idx not in matched_yolo_indices:
-                all_fn_yolo_areas.append(current_yolo_original_areas[y_idx])
+        total_fns = len(all_fn_yolo_areas)
+        total_fps = len(all_fp_thermal_areas)
+        total_tps = len(total_matched_distances)
 
-        # False Positives: Thermal detections that were not successfully matched by any YOLO detection.
-        for t_idx in range(num_thermal):
-            if t_idx not in matched_thermal_indices:
-                all_fp_thermal_areas.append(current_thermal_original_areas[t_idx])
+        # Total relevant events for percentage calculation (TP + FP + FN)
+        # This represents all instances where at least one camera detected something,
+        # after filtering and FOV alignment, and we tried to classify it.
+        total_relevant_events = total_tps + total_fps + total_fns 
 
-    # --- 5. Calculate Overall Accuracy Metrics ---
-    
-    total_fns = len(all_fn_yolo_areas)
-    total_fps = len(all_fp_thermal_areas)
-    total_tps = len(total_matched_distances) # Each matched distance represents a True Positive
+        tp_percentage = (total_tps / total_relevant_events * 100) if total_relevant_events > 0 else 0
+        fp_percentage = (total_fps / total_relevant_events * 100) if total_relevant_events > 0 else 0
+        fn_percentage = (total_fns / total_relevant_events * 100) if total_relevant_events > 0 else 0
 
-    # Precision: Of all detections made by the thermal camera, how many were correct?
-    # TP / (TP + FP)
-    precision = total_tps / (total_tps + total_fps) if (total_tps + total_fps) > 0 else 0
-    
-    # Recall: Of all actual people (as detected by YOLO), how many did the thermal camera find?
-    # TP / (TP + FN)
-    recall = total_tps / (total_tps + total_fns) if (total_tps + total_fns) > 0 else 0
-    
-    # F1-Score: The harmonic mean of Precision and Recall, providing a balanced measure
-    # of the model's accuracy.
-    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        precision = total_tps / (total_tps + total_fps) if (total_tps + total_fps) > 0 else 0
+        recall = total_tps / (total_tps + total_fns) if (total_tps + total_fns) > 0 else 0
+        f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
 
-    # Average pixel offset for successfully matched detections. This indicates
-    # the spatial accuracy of the thermal camera relative to YOLO.
-    avg_pixel_offset = np.mean(total_matched_distances) if total_matched_distances else 0
+        avg_pixel_offset = np.mean(total_matched_distances) if total_matched_distances else 0
 
-    # --- 6. Display Results ---
-    print(f"\n--- Thermal Camera Accuracy Analysis ---")
-    print(f"Analysis based on {len(df)} timestamps from '{csv_file}'")
-    print(f"YOLO Resolution: {YOLO_WIDTH}x{YOLO_HEIGHT}, Thermal Raw Resolution: {THERMAL_RAW_WIDTH}x{THERMAL_RAW_HEIGHT}")
-    print(f"Thermal FOV Cropped to {THERMAL_CROP_FACTOR*100:.0f}% central region.")
-    print(f"YOLO Min Area Threshold: {YOLO_MIN_AREA_THRESHOLD} pixels, Thermal Min Area Threshold: {THERMAL_MIN_AREA_THRESHOLD} pixels")
-    print(f"Matching Distance Threshold: {MATCHING_DISTANCE_THRESHOLD} pixels (on {YOLO_WIDTH}x{YOLO_HEIGHT} grid)")
-    print("-" * 60)
+        # --- 6. Correlation Analysis ---
+        fn_yolo_distribution = None
+        if all_fn_yolo_areas:
+            fn_yolo_distribution = pd.cut(all_fn_yolo_areas, bins=yolo_area_bins, labels=yolo_area_bin_labels, right=False).value_counts().sort_index()
 
-    print(f"Total YOLO Detections Considered (after area filter): {total_yolo_detections_considered}")
-    print(f"Total Thermal Detections Considered (after area/FOV filter): {total_thermal_detections_considered}")
-    print("-" * 60)
+        fp_thermal_distribution = None
+        if all_fp_thermal_areas:
+            fp_thermal_distribution = pd.cut(all_fp_thermal_areas, bins=thermal_area_bins, labels=thermal_area_bin_labels, right=False).value_counts().sort_index()
 
-    print(f"1. DETECTION ACCURACY")
-    print(f"   - True Positives (TP): {total_tps} (YOLO detected & Thermal matched)")
-    print(f"   - False Positives (FP): {total_fps} (Thermal detected, but no YOLO match)")
-    print(f"   - False Negatives (FN): {total_fns} (YOLO detected, but no Thermal match)")
-    print(f"   - Precision: {precision:.2f}")
-    print(f"   - Recall: {recall:.2f}")
-    print(f"   - F1-Score: {f1_score:.2f}")
-    print("-" * 60)
+        results = {
+            'num_timestamps': len(df),
+            'total_yolo_detections_considered': total_yolo_detections_considered,
+            'total_thermal_detections_considered': total_thermal_detections_considered,
+            'total_tps': total_tps,
+            'total_fps': total_fps,
+            'total_fns': total_fns,
+            'tp_percentage': tp_percentage,
+            'fp_percentage': fp_percentage,
+            'fn_percentage': fn_percentage,
+            'precision': precision,
+            'recall': recall,
+            'f1_score': f1_score,
+            'avg_pixel_offset': avg_pixel_offset,
+            'fn_yolo_distribution': fn_yolo_distribution,
+            'fp_thermal_distribution': fp_thermal_distribution
+        }
+        
+        return results, image_events_for_gui
 
-    print(f"2. SPATIAL ACCURACY")
-    print(f"   - Avg. Matched Distance Offset: {avg_pixel_offset:.2f} pixels (for TP matches)")
-    print("-" * 60)
-
-    print(f"3. FALSE NEGATIVE ANALYSIS (YOLO detections missed by Thermal, by YOLO object size)")
-    if all_fn_yolo_areas:
-        # Categorize FN YOLO detections by their area using predefined bins
-        fn_yolo_counts_by_bin = pd.cut(all_fn_yolo_areas, bins=YOLO_AREA_BINS, labels=YOLO_AREA_BIN_LABELS, right=False)
-        fn_yolo_distribution = fn_yolo_counts_by_bin.value_counts().sort_index()
-        print(fn_yolo_distribution)
-        print(f"   Total FNs: {total_fns}")
-    else:
-        print("   No False Negatives recorded.")
-    print("-" * 60)
-
-    print(f"4. FALSE POSITIVE ANALYSIS (Thermal detections not matched by YOLO, by Thermal object size)")
-    if all_fp_thermal_areas:
-        # Categorize FP Thermal detections by their area using predefined bins
-        fp_thermal_counts_by_bin = pd.cut(all_fp_thermal_areas, bins=THERMAL_AREA_BINS, labels=THERMAL_AREA_BIN_LABELS, right=False)
-        fp_thermal_distribution = fp_thermal_counts_by_bin.value_counts().sort_index()
-        print(fp_thermal_distribution)
-        print(f"   Total FPs: {total_fps}")
-    else:
-        print("   No False Positives recorded.")
-    print("-" * 60)
-
-
+# --- Main execution block for GUI ---
 if __name__ == "__main__":
-    # This block creates a dummy CSV file with your provided data for testing purposes.
-    # In a real scenario, you would already have your 'detections.csv' file.
-    test_csv_content = """timestamp,thermal_count,yolo_count,thermal_data,yolo_data
-1772700974,0,0,[],[]
-1772700977,0,0,[],[]
-1772700980,0,0,[],[]
-1772700983,1,0,"[{'x': 1, 'y': 13, 'area': 20}]",[]
-1772700986,1,0,"[{'x': 3, 'y': 13, 'area': 22}]",[]
-1772700990,1,0,"[{'x': 3, 'y': 12, 'area': 26}]",[]
-1772700993,1,0,"[{'x': 4, 'y': 14, 'area': 25}]",[]
-1772700996,0,3,[],"[{'x1': 517, 'y1': 190, 'x2': 639, 'y2': 478}, {'x1': 0, 'y1': 334, 'x2': 19, 'y2': 419}, {'x1': 517, 'y1': 192, 'x2': 639, 'y2': 479}]"
-1772700999,1,1,"[{'x': 11, 'y': 14, 'area': 32}]","[{'x1': 278, 'y1': 178, 'x2': 492, 'y2': 479}]"
-1772701002,1,1,"[{'x': 17, 'y': 15, 'area': 62}]","[{'x1': 129, 'y1': 152, 'x2': 388, Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned'y2': 478}]"
-1772701005,1,0,"[{'x': 26, 'y': 15, 'area': 52}]",[]
-1772701008,1,1,"[{'x': 28, 'y': 13, 'area': 78}]","[{'x1': 0, 'y1': 135, 'x2': 254, 'y2': 479}]"
-1772701011,1,1,"[{'x': 17, 'y': 14, 'area': 63}]","[{'x1': 211, 'y1': 148, 'x2': 468, 'y2': 479}]"
-1772701014,1,1,"[{'x': 16, 'y': 14, 'area': 65}]","[{'x1': 296, 'y1': 131, 'x2': 459, 'y2': 478}]"
-1772701017,1,1,"[{'x': 9, 'y': 14, 'area': 50}]","[{'x1': 459, 'y1': 109, 'x2': 627, 'y2': 477}]"
-1772701020,1,1,"[{'x': 9, 'y': 14, 'area': 60}]","[{'x1': 415, 'y1': 137, 'x2': 639, 'y2': 477}]"
-1772701023,1,1,"[{'x': 10, 'y': 13, 'area': 60}]","[{'x1': 416, 'y1': 125, 'x2': 638, 'y2': 478}]"
-1772701026,1,1,"[{'x': 10, 'y': 14, 'area': 68}]","[{'x1': 342, 'y1': 167, 'x2': 580, 'y2': 478}]"
-1772701029,1,1,"[{'x': 11, 'y': 15, 'area': 47}]","[{'x1': 381, 'y1': 163, 'x2': 545, 'y2': 477}]"
-1772701032,1,1,"[{'x': 13, 'y': 15, 'area': 45}]","[{'x1': 271, 'y1': 167, 'x2': 417, 'y2': 478}]"
-1772701035,1,1,"[{'x': 16, 'y': 14, 'area': 32}]","[{'x1': 234, 'y1': 162, 'x2': 389, 'y2': 479}]"
-1772701038,1,1,"[{'x': 16, 'y': 12, 'area': 45}]","[{'x1': 265, 'y1': 151, 'x2': 414, 'y2': 476}]"
-1772701042,1,1,"[{'x': 16, 'y': 12, 'area': 57}]","[{'x1': 250, 'y1': 93, 'x2': 425, 'y2': 477}]"
-1772701045,0,2,[],"[{'x1': 249, 'y1': 166, 'x2': 391, 'y2': 476}, {'x1': 249, 'y1': 163, 'x2': 392, 'y2': 475}]"
-1772701048,0,1,[],"[{'x1': 241, 'y1': 189, 'x2': 413, 'y2': 476}]"
-1772701051,0,1,[],"[{'x1': 196, 'y1': 174, 'x2': 372, 'y2': 476}]"
-1772701054,0,1,[],"[{'x1': 45, 'y1': 192, 'x2': 235, 'y2': 479}]"
-1772701057,0,1,[],"[{'x1': 247, 'y1': 190, 'x2': 385, 'y2': 478}]"
-1772701060,0,3,[],"[{'x1': 317, 'y1': 134, 'x2': 560, 'y2': 478}, {'x1': 11, 'y1': 183, 'x2': 234, 'y2': 478}, {'x1': 0, 'y1': 281, 'x2': 50, 'y2': 416}]"
-1772701063,1,3,"[{'x': 12, 'y': 11, 'area': 27}]","[{'x1': 331, 'y1': 145, 'x2': 562, 'y2': 477}, {'x1': 69, 'y1': 268, 'x2': 152, 'y2': 474}, {'x1': 0, 'y1': 253, 'x2': 68, 'y2': 477}]"
-1772701066,1,3,"[{'x': 12, 'y': 12, 'area': 26}]","[{'x1': 331, 'y1': 149, 'x2': 560, 'y2': 477}, {'x1': 0, 'y1': 217, 'x2': 150, 'y2': 477}, {'x1': 0, 'y1': 270, 'x2': 27, 'y2': 339}]"
-1772701069,1,1,"[{'x': 13, 'y': 12, 'area': 35}]","[{'x1': 307, 'y1': 157, 'x2': 554, 'y2': 477}]"
-1772701072,1,1,"[{'x': 13, 'y': 11, 'area': 38}]","[{'x1': 292, 'y1': 149, 'x2': 526, 'y2': 477}]"
-1772701075,1,2,"[{'x': 13, 'y': 12, 'area': 31}]","[{'x1': 349, 'y1': 175, 'x2': 500, 'y2': 476}, {'x1': 349, 'y1': 175, 'x2': 498, 'y2': 477}]"
-1772701078,0,1,[],"[{'x1': 569, 'y1': 195, 'x2': 639, 'y2': 471}]"
-1772701081,0,0,[],[]
-1772701084,0,1,[],"[{'x1': 166, 'y1': 183, 'x2': 359, 'y2': 478}]"
-1772701087,1,0,"[{'x': 25, 'y': 9, 'area': 22}]",[]
-1772701090,0,1,[],"[{'x1': 0, 'y1': 334, 'x2': 20, 'y2': 480}]"
-1772701094,0,2,[],"[{'x1': 145, 'y1': 173, 'x2': 301, 'y2': 477}, {'x1': 20, 'y1': 294, 'x2': 56, 'y2': 325}]"
-1772701097,0,0,[],[]
-"""
-    with open('detections.csv', 'w', newline='') as f:
-        f.write(test_csv_content)
+    current_script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    calculate_accuracy('detections.csv')
+    # Define paths
+    default_csv_filename = 'detections.csv'
+    dummy_csv_filename = 'dummy_detections.csv'
+    dummy_data_subdir = 'dummy_data'
+
+    default_csv_path = os.path.join(current_script_dir, default_csv_filename)
+    dummy_csv_path = os.path.join(current_script_dir, dummy_data_subdir, dummy_csv_filename)
+    dummy_image_dir = os.path.join(current_script_dir, dummy_data_subdir)
+
+    initial_csv_path = ""
+    initial_image_dir = ""
+
+    # Determine which CSV to use
+    if os.path.exists(default_csv_path):
+        initial_csv_path = default_csv_path
+        initial_image_dir = current_script_dir # Assume images are in the same directory as detections.csv
+    elif os.path.exists(dummy_csv_path):
+        initial_csv_path = dummy_csv_path
+        initial_image_dir = dummy_image_dir
+        # Warn if the dummy image directory doesn't exist
+        if not os.path.exists(initial_image_dir):
+            messagebox.showwarning("Warning", 
+                                   f"Dummy image directory not found at '{initial_image_dir}'. "
+                                   "Image review might not work correctly. Please ensure dummy images are present.")
+    else:
+        messagebox.showerror("Error", 
+                              f"Neither '{default_csv_filename}' (in script directory) "
+                              f"nor '{dummy_csv_path}' found. "
+                              "Please provide a CSV file using the 'Browse...' button.")
+        # Initialize with empty paths, letting the user browse
+        initial_csv_path = ""
+        initial_image_dir = ""
+
+    root = tk.Tk()
+    app = AccuracyAnalyzerGUI(root)
+    
+    # Set initial paths for convenience if found
+    if initial_csv_path:
+        app.csv_file_path.set(initial_csv_path)
+    if initial_image_dir:
+        app.image_dir_path.set(initial_image_dir)
+    
+    root.mainloop()
