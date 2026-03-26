@@ -17,14 +17,14 @@ YOLO_WIDTH_DEFAULT = 640
 YOLO_HEIGHT_DEFAULT = 480
 
 # Thermal FOV Adjustment (Cropping Factor):
-THERMAL_CROP_FACTOR_DEFAULT = 0.8 
+THERMAL_CROP_FACTOR_DEFAULT = 60
 
 # Minimum Area Thresholds:
-YOLO_MIN_AREA_THRESHOLD_DEFAULT = 500
+YOLO_MIN_AREA_THRESHOLD_DEFAULT = 10000
 THERMAL_MIN_AREA_THRESHOLD_DEFAULT = 10
 
 # Matching Distance Threshold:
-MATCHING_DISTANCE_THRESHOLD_DEFAULT = 20
+MATCHING_DISTANCE_THRESHOLD_DEFAULT = 400
 
 # Area bins for correlation analysis:
 YOLO_AREA_BINS_DEFAULT = [0, 2000, 5000, 15000, 30000, np.inf]
@@ -72,10 +72,10 @@ class AccuracyAnalyzerGUI:
         param_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
 
         results_frame = ttk.LabelFrame(self.master, text="Analysis Results", padding="10")
-        results_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+        results_frame.grid(row=0, column=1, rowspan=2, padx=10, pady=10, sticky="nsew")
 
         image_review_frame = ttk.LabelFrame(self.master, text="Image Review", padding="10")
-        image_review_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
+        image_review_frame.grid(row=1, column=0, padx=10, pady=10, sticky="nsew")
 
         self.master.grid_rowconfigure(0, weight=1)
         self.master.grid_rowconfigure(1, weight=1)
@@ -97,8 +97,8 @@ class AccuracyAnalyzerGUI:
         ttk.Separator(param_frame, orient="horizontal").grid(row=row_idx, column=0, columnspan=3, sticky="ew", pady=5)
         row_idx += 1
 
-        ttk.Label(param_frame, text="Thermal Crop Factor (0.1-1.0):").grid(row=row_idx, column=0, sticky="w", pady=2)
-        ttk.Scale(param_frame, from_=0.1, to=1.0, orient="horizontal", variable=self.thermal_crop_factor).grid(row=row_idx, column=1, sticky="ew", pady=2)
+        ttk.Label(param_frame, text="Thermal Crop Factor (0-100%):").grid(row=row_idx, column=0, sticky="w", pady=2)
+        tk.Scale(param_frame, from_=0, to=100, resolution=1, orient="horizontal", variable=self.thermal_crop_factor, showvalue=0).grid(row=row_idx, column=1, sticky="ew", pady=2)
         ttk.Label(param_frame, textvariable=self.thermal_crop_factor, width=5).grid(row=row_idx, column=2, sticky="w", padx=5, pady=2)
         row_idx += 1
 
@@ -229,7 +229,7 @@ class AccuracyAnalyzerGUI:
         output = f"--- Thermal Camera Accuracy Analysis ---\n"
         output += f"Analysis based on {res['num_timestamps']} timestamps from '{self.csv_file_path.get()}'\n"
         output += f"YOLO Resolution: {YOLO_WIDTH_DEFAULT}x{YOLO_HEIGHT_DEFAULT}, Thermal Raw Resolution: {THERMAL_RAW_WIDTH_DEFAULT}x{THERMAL_RAW_HEIGHT_DEFAULT}\n"
-        output += f"Thermal FOV Cropped to {self.thermal_crop_factor.get()*100:.0f}% central region.\n"
+        output += f"Thermal FOV Cropped to {self.thermal_crop_factor.get():.0f}% central region.\n"
         output += f"YOLO Min Area Threshold: {self.yolo_min_area_threshold.get()} pixels, Thermal Min Area Threshold: {self.thermal_min_area_threshold.get()} pixels\n"
         output += f"Matching Distance Threshold: {self.matching_distance_threshold.get()} pixels (on {YOLO_WIDTH_DEFAULT}x{YOLO_HEIGHT_DEFAULT} grid)\n"
         output += "-" * 60 + "\n\n"
@@ -363,8 +363,8 @@ class AccuracyAnalyzerGUI:
         total_thermal_detections_considered = 0
 
         # Pre-calculate Thermal FOV cropping and scaling parameters
-        cropped_thermal_width = THERMAL_RAW_WIDTH_DEFAULT * thermal_crop_factor
-        cropped_thermal_height = THERMAL_RAW_HEIGHT_DEFAULT * thermal_crop_factor
+        cropped_thermal_width = THERMAL_RAW_WIDTH_DEFAULT * thermal_crop_factor/100
+        cropped_thermal_height = THERMAL_RAW_HEIGHT_DEFAULT * thermal_crop_factor/100
         
         offset_x = (THERMAL_RAW_WIDTH_DEFAULT - cropped_thermal_width) / 2
         offset_y = (THERMAL_RAW_HEIGHT_DEFAULT - cropped_thermal_height) / 2
